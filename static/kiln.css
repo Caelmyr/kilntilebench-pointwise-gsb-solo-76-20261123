@@ -83,6 +83,9 @@ form, .field-grid { display: grid; gap: 11px; }
 form > button { justify-self: start; }
 label { display: grid; gap: 5px; font-size: .91rem; color: #355552; }
 input, select { padding: 7px; background: white; border: 1px solid #b9bfaf; border-radius: 5px; color: #263c38; min-width: 0; width: 100%; }
+.check-list { display: grid; gap: 5px; padding: 9px; border: 1px solid var(--rule); border-radius: 6px; background: #f4f8f5; max-height: 190px; overflow: auto; }
+.check-list label { display: flex; grid-template-columns: none; align-items: center; gap: 8px; font-size: .9rem; }
+.check-list input { width: auto; }
 .dialog-stage { margin: 0; cursor: crosshair; }
 .dialog-stage img { max-height: 54vh; }
 .result-hero { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(175px, 1fr); align-items: start; gap: 13px; }

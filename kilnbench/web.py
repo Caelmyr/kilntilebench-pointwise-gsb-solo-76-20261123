@@ -6,7 +6,7 @@ from flask import Blueprint, Response, jsonify, render_template, request, send_f
 from image_lab.validation import Conflict, Invalid
 
 from . import analysis, demo, evidence, photos
-from .model import MARKS, READINGS, ROLES, choice, locate, mark_fields, obj, run_fields, text
+from .model import MARKS, READINGS, ROLES, choice, identifier, locate, mark_fields, obj, run_fields, text
 from .store import Library, identity, stamp
 
 MEASUREMENTS = {
@@ -15,6 +15,9 @@ MEASUREMENTS = {
     "decal-coverage": (analysis.decal_coverage, {"region": "decor", "baseglaze": "baseglaze", "accent": "accent"}, {}),
     "brush-period": (analysis.brush_period, {"region": "repeat"}, {}),
     "pinhole-map": (analysis.pinhole_map, {"region": "pinhole"}, {}),
+    "repair-selection": (analysis.repair_selection,
+                         {"inspection": "pinhole", "candidates": "repair", "reserve": "reserve"}, {}),
+    "repair-tone": (analysis.repair_tone, {"window": "inspect"}, {}),
     "rim_transition": (analysis.rim_transition, {"line": "stroke"}, {}),
     "decal-offset": (analysis.decal_offsets, {"reference": "register"}, {"comparison": "register"}),
     "grazing-response": (analysis.grazing_response, {"matte": "matte", "gloss": "gloss", "decor": "decor"}, {}),
@@ -22,10 +25,14 @@ MEASUREMENTS = {
     "surface-marks": (analysis.surface_marks, {"region": "inspect"}, {}),
     "color-drift": (analysis.color_drift, {"region": "inspect"}, {}),
 }
+LIST_SLOTS = {"candidates"}
+OPTIONAL_SLOTS = {"reserve"}
 PAIRED = {"decal-offset", "grazing-response", "paired-coverage", "color-drift"}
 OPTIONS = {
     "decal-coverage": {"threshold": ["Decal likeness threshold", .5, .01]},
     "pinhole-map": {"luma": ["Dark-pit threshold", .31, .01]},
+    "repair-selection": {"luma": ["Dark-pit threshold", .31, .01],
+                         "minimum_pits": ["Minimum full observed pits", 2, 1]},
     "surface-marks": {"contrast": ["Spot contrast", .075, .005], "minimum_mm2": ["Minimum area (mm²)", .15, .01]},
     "color-drift": {"delta_e": ["Color difference threshold", 5, .1]},
 }
@@ -48,15 +55,35 @@ def measure(library, run, data):
     marked = obj(data.get("marks", {}))
     selected = {}
 
+    def read_one(slot, purpose, capture):
+        mark = locate(run["marks"], marked.get(slot), MARKS[purpose])
+        if mark["photo"] != capture["id"] or mark["purpose"] != purpose:
+            raise Invalid(f"Select a {MARKS[purpose].lower()} mark from the specified photograph.")
+        selected[slot] = mark
+
     def read_marks(assigned, capture):
         for slot, purpose in assigned.items():
-            mark = locate(run["marks"], marked.get(slot), MARKS[purpose])
-            if mark["photo"] != capture["id"] or mark["purpose"] != purpose:
-                raise Invalid(f"Select a {MARKS[purpose].lower()} mark from the specified photograph.")
-            selected[slot] = mark
+            if slot in LIST_SLOTS:
+                values = marked.get(slot)
+                if not isinstance(values, list) or not 1 <= len(values) <= 8:
+                    raise Invalid("Choose between one and eight repair range marks.")
+                if len(set(values)) != len(values):
+                    raise Invalid("Choose each repair range mark only once.")
+                chosen = []
+                for value in values:
+                    mark = locate(run["marks"], value, MARKS[purpose])
+                    if mark["photo"] != capture["id"] or mark["purpose"] != purpose:
+                        raise Invalid(f"Select a {MARKS[purpose].lower()} mark from the specified photograph.")
+                    chosen.append(mark)
+                selected[slot] = chosen
+            elif slot in OPTIONAL_SLOTS and not marked.get(slot):
+                selected[slot] = None
+            else:
+                read_one(slot, purpose, capture)
 
     read_marks(source_roles, source)
     used = [source]
+    snapshot = None
     if mode in PAIRED:
         other = locate(run["photos"], data.get("other"), "The comparison photograph")
         if other["id"] == source["id"]:
@@ -65,13 +92,23 @@ def measure(library, run, data):
         read_marks(other_roles, other)
         used.append(other)
         summary, rows, pixels = work(source_frame, other_frame, selected, options)
+    elif mode == "repair-tone":
+        reference = library.reading(run, identifier(data.get("reference_reading")))
+        if reference.get("mode") != "repair-selection":
+            raise Invalid("Choose a saved Glaze repair selection reading as the reference.")
+        summary, rows, pixels = work(source_frame, selected, options, reference)
+    elif mode == "repair-selection":
+        summary, rows, pixels, snapshot = work(source_frame, selected, options)
     else:
         summary, rows, pixels = work(source_frame, selected, options)
-    return {
+    result = {
         "mode": mode, "title": READINGS[mode][0], "summary": summary, "rows": rows, "photos": used,
         "options": options, "marks": selected, "sheet_mm": [run["width_mm"], run["height_mm"]],
         "source_revision": run["revision"], "overlay": library.keep(photos.png(pixels)),
     }
+    if snapshot is not None:
+        result["snapshot"] = snapshot
+    return result
 
 
 def install(app, root):
@@ -91,8 +128,11 @@ def install(app, root):
         definitions = {}
         for mode, (title, help_text) in READINGS.items():
             _, source_roles, other_roles = MEASUREMENTS[mode]
-            definitions[mode] = {"title": title, "help": help_text, "reference": source_roles, "comparison": other_roles,
-                                 "paired": mode in PAIRED, "options": OPTIONS.get(mode, {})}
+            definitions[mode] = {"title": title, "help": help_text, "reference": source_roles,
+                                "comparison": other_roles, "paired": mode in PAIRED,
+                                "options": OPTIONS.get(mode, {}), "list_slots": sorted(LIST_SLOTS),
+                                "optional_slots": sorted(OPTIONAL_SLOTS),
+                                "requires_reading": mode == "repair-tone"}
         return jsonify(readings=definitions, marks=MARKS, roles=ROLES)
 
     @api.get("/runs")

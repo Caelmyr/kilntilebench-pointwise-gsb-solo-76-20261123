@@ -112,6 +112,15 @@ def create(library):
                 (fx + shift[0] + (i % 2), fy + shift[1]) for i, (fx, fy) in enumerate(REGISTERS)
             ])),
         ])
+        if role == "face":
+            # Two viable repair ranges and one edge-cut range, plus a retained
+            # original-glaze patch no repair range is allowed to touch.
+            items.extend([
+                ("Compact repair / two full pits", "repair", box(275, 372, 345, 428)),
+                ("Full repair / all observed pits", "repair", box(222, 360, 426, 480)),
+                ("Edge-cut repair / half pit", "repair", box(330, 380, 400, 440)),
+                ("Retained original glaze sample", "reserve", box(230, 484, 280, 502)),
+            ])
         for title, purpose, vertices in items:
             marks.append({"id": identity(), "title": title, "purpose": purpose, "points": vertices, "photo": photo["id"]})
     return library.new_run({"title": "Indigo border tile", "stock": "Synthetic fired glaze sample",

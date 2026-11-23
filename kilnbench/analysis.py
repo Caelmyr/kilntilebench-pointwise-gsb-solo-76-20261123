@@ -120,15 +120,13 @@ def brush_period(frame, marks, _opts):
             "peaks": len(rows)}, rows, shown
 
 
-def pinhole_map(frame, marks, opts):
-    """Measure visible, compact dark pits and keep broad shaded marks separate."""
-    area = selection(frame, marks["region"])
-    cutoff = number(opts.get("luma", .31), "dark pit threshold", .05, .95)
+def compact_pits(frame, area, cutoff):
+    """Detect compact dark pits inside an observed area; broad shaded marks stay separate."""
     candidates = area & (frame.luma <= cutoff)
     count, labels, stats, centroids = cv.connectedComponentsWithStats(candidates.astype(np.uint8), connectivity=8)
     pixel_area = frame.step[0] * frame.step[1]
-    rows = []
     pits = np.zeros(area.shape, dtype=bool)
+    rows = []
     for label in range(1, count):
         x, y, width, height, pixels = stats[label]
         area_mm2 = float(pixels * pixel_area)
@@ -137,15 +135,195 @@ def pinhole_map(frame, marks, opts):
             continue
         local = labels[y:y + height, x:x + width] == label
         pits[y:y + height, x:x + width] |= local
-        rows.append({"area_mm2": round(area_mm2, 4), "center_mm": rounded(centroids[label] * frame.step),
-                     "width_mm": round(horizontal, 4), "height_mm": round(vertical, 4)})
+        rows.append({
+            "label": label, "x": int(x), "y": int(y), "width": int(width), "height": int(height),
+            "area_mm2": round(area_mm2, 4), "center_mm": rounded(centroids[label] * frame.step),
+            "width_mm": round(float(horizontal), 4), "height_mm": round(float(vertical), 4),
+        })
     rows.sort(key=lambda item: item["area_mm2"], reverse=True)
+    return candidates, labels, pits, rows
+
+
+def fully_observed(pit_row, labels, observed):
+    """A pit counts only when every detected pixel is observed and unobscured.
+
+    Pits cut by the inspection patch boundary, a missing-coverage area, or any
+    unphotographed position fail this check and cannot be counted as full pits.
+    """
+    return bool(np.all(observed[labels == pit_row["label"]]))
+
+
+def pit_pixels(pit_row, labels):
+    return labels == pit_row["label"]
+
+
+def pit_touches(pit_row, labels, footprint):
+    return bool(np.any(footprint & pit_pixels(pit_row, labels)))
+
+
+def pit_inside(pit_row, labels, footprint):
+    pixels = pit_pixels(pit_row, labels)
+    return bool(np.all(footprint[pixels]))
+
+
+def pinhole_map(frame, marks, opts):
+    """Measure visible, compact dark pits and keep broad shaded marks separate."""
+    area = selection(frame, marks["region"])
+    cutoff = number(opts.get("luma", .31), "dark pit threshold", .05, .95)
+    candidates, _labels, pits, rows = compact_pits(frame, area, cutoff)
+    pixel_area = frame.step[0] * frame.step[1]
     shown = image(frame)
     tint(shown, area & ~candidates, (.25, .78, .73), .22)
     tint(shown, candidates & ~pits, (.65, .36, .83), .44)
     tint(shown, pits, (.95, .48, .24))
+    public_rows = [{key: value for key, value in row.items() if key not in ("label", "x", "y", "width", "height")}
+                   for row in rows]
     return {"pit_count": len(rows), "pit_area_mm2": round(float(pits.sum() * pixel_area), 4),
-            "observed_mm2": round(float(area.sum() * pixel_area), 4)}, rows[:40], shown
+            "observed_mm2": round(float(area.sum() * pixel_area), 4)}, public_rows[:40], shown
+
+
+def repair_selection(frame, marks, opts):
+    """Pick exactly one glaze repair range from the marked candidates."""
+    minimum = number(opts.get("minimum_pits", 2), "minimum full observed pits", 1, 40)
+    cutoff = number(opts.get("luma", .31), "dark pit threshold", .05, .95)
+    inspection = selection(frame, marks["inspection"])
+    reserve = None
+    if "reserve" in marks and marks["reserve"] is not None:
+        reserve = region(frame, marks["reserve"])
+    candidates, labels, _pits, pit_rows = compact_pits(frame, inspection, cutoff)
+    observed = inspection & frame.useful
+    pixel_area = frame.step[0] * frame.step[1]
+    height, width = inspection.shape
+
+    evaluations = []
+    for mark in marks["candidates"]:
+        footprint = region(frame, mark)
+        if not np.any(footprint & observed):
+            raise Invalid("Each repair range needs usable observed image pixels inside the inspection face.")
+        contained, edge_cut = [], []
+        for pit in pit_rows:
+            if not fully_observed(pit, labels, observed):
+                continue
+            if pit_inside(pit, labels, footprint):
+                contained.append(pit)
+            elif pit_touches(pit, labels, footprint):
+                edge_cut.append(pit)
+        touches_reserve = bool(reserve is not None and np.any(footprint & reserve))
+        eligible = (not touches_reserve) and len(contained) >= minimum and not edge_cut
+        evaluations.append({
+            "mark_id": mark["id"], "title": mark["title"], "eligible": eligible,
+            "full_observed_pits": len(contained), "edge_cut_pits": len(edge_cut),
+            "touches_retained_glaze": touches_reserve,
+            "footprint_mm2": round(float(footprint.sum() * pixel_area), 4),
+            "covered_pit_area_mm2": round(float(sum(pit["area_mm2"] for pit in contained)), 4),
+            "points": mark["points"],
+        })
+
+    eligible_ranges = [item for item in evaluations if item["eligible"]]
+    if not eligible_ranges:
+        raise Invalid("No repair range covers the minimum fully observed pits without cutting a pit or touching the retained glaze.")
+    # Prefer the least disturbance of sound original glaze; break ties by the
+    # larger covered pit area, then keep the result deterministic.
+    chosen = sorted(eligible_ranges,
+                    key=lambda item: (item["footprint_mm2"], -item["covered_pit_area_mm2"], item["title"]))[0]
+
+    chosen_mark = next(mark for mark in marks["candidates"] if mark["id"] == chosen["mark_id"])
+    chosen_footprint = region(frame, chosen_mark)
+    chosen_pits = [pit for pit in pit_rows
+                   if fully_observed(pit, labels, observed) and pit_inside(pit, labels, chosen_footprint)]
+    snapshot_pits = []
+    for pit in chosen_pits:
+        x0 = pit["x"] / (width - 1)
+        y0 = pit["y"] / (height - 1)
+        x1 = (pit["x"] + pit["width"] - 1) / (width - 1)
+        y1 = (pit["y"] + pit["height"] - 1) / (height - 1)
+        snapshot_pits.append({
+            "center_mm": pit["center_mm"], "area_mm2": pit["area_mm2"],
+            "width_mm": pit["width_mm"], "height_mm": pit["height_mm"],
+            "bbox_points": [[x0, y0], [x1, y0], [x1, y1], [x0, y1]],
+        })
+
+    shown = image(frame)
+    tint(shown, observed & ~candidates, (.25, .78, .73), .18)
+    tint(shown, candidates, (.65, .36, .83), .34)
+    if reserve is not None:
+        tint(shown, reserve, (.95, .84, .32), .5)
+    for item in evaluations:
+        footprint = region(frame, next(mark for mark in marks["candidates"] if mark["id"] == item["mark_id"]))
+        tint(shown, footprint, (.3, .62, .96) if item["mark_id"] != chosen["mark_id"] else (.95, .48, .24), .42)
+
+    rows = [{
+        "repair_range": item["title"], "eligible": item["eligible"],
+        "full_observed_pits": item["full_observed_pits"], "edge_cut_pits": item["edge_cut_pits"],
+        "touches_retained_glaze": item["touches_retained_glaze"],
+        "footprint_mm2": item["footprint_mm2"], "covered_pit_area_mm2": item["covered_pit_area_mm2"],
+        "adopted": item["mark_id"] == chosen["mark_id"],
+    } for item in evaluations]
+    summary = {
+        "adopted_repair_range": chosen["title"], "adopted_mark_id": chosen["mark_id"],
+        "minimum_full_observed_pits": minimum, "dark_pit_threshold": cutoff,
+        "eligible_ranges": len(eligible_ranges), "candidate_ranges": len(evaluations),
+        "adopted_full_observed_pits": chosen["full_observed_pits"],
+        "adopted_footprint_mm2": chosen["footprint_mm2"],
+        "adopted_covered_pit_area_mm2": chosen["covered_pit_area_mm2"],
+    }
+    snapshot = {
+        "mode": "repair-selection", "luma": cutoff, "minimum_pits": minimum,
+        "adopted_mark_id": chosen["mark_id"], "adopted_title": chosen["title"],
+        "adopted_points": chosen["points"],
+        "reserve_points": marks["reserve"]["points"] if marks.get("reserve") is not None else None,
+        "pits": snapshot_pits,
+    }
+    return summary, rows, shown, snapshot
+
+
+def repair_tone(frame, marks, opts, reference):
+    """Glaze tone measured only on untouched, fully observed original glaze."""
+    if reference.get("mode") != "repair-selection":
+        raise Invalid("Choose a saved Glaze repair selection reading as the reference.")
+    window = region(frame, marks["window"])
+    if not np.any(window):
+        raise Invalid("The tone window needs a marked area on the calibrated tile plane.")
+    snapshot = reference["snapshot"]
+    footprint = region(frame, {"points": snapshot["adopted_points"]})
+    # Re-detect compact pits with the threshold frozen in the adopted reading,
+    # so residual pits outside the repair range are also excluded without
+    # depending on any later Pinhole map.
+    _candidates, _labels, fresh_pits, _pit_rows = compact_pits(frame, window & frame.useful, snapshot["luma"])
+    known_pits = np.zeros(frame.support.shape, dtype=bool)
+    for pit in snapshot["pits"]:
+        known_pits |= region(frame, {"points": pit["bbox_points"]})
+    residual_pits = fresh_pits & ~footprint
+    all_pits = known_pits | fresh_pits
+
+    missing = window & ~frame.support
+    excluded = footprint | all_pits | ~frame.support
+    measured = window & frame.useful & ~excluded
+    if np.count_nonzero(measured) < 32:
+        raise Invalid("Not enough untouched, observed original glaze remains in this window.")
+    lab_pixels = lab(frame.rgb[measured])
+    low, center, high = np.percentile(lab_pixels, [10, 50, 90], axis=0)
+    pixel_area = frame.step[0] * frame.step[1]
+    rows = [
+        {"channel": name, "p10": round(float(low[i]), 4), "median": round(float(center[i]), 4),
+         "p90": round(float(high[i]), 4)}
+        for i, name in enumerate(("L*", "a*", "b*"))
+    ]
+    shown = image(frame)
+    tint(shown, missing, (.45, .45, .45), .5)
+    tint(shown, residual_pits & window, (.65, .36, .83), .5)
+    tint(shown, footprint & window, (.95, .48, .24), .38)
+    tint(shown, measured, (.38, .78, .86), .3)
+    summary = {
+        "reference_reading": snapshot["adopted_title"], "reference_mark_id": snapshot["adopted_mark_id"],
+        "pixels": int(measured.sum()), "lab": rounded(center),
+        "lightness_spread": round(float(high[0] - low[0]), 4),
+        "window_mm2": round(float(window.sum() * pixel_area), 4),
+        "excluded_repair_mm2": round(float((footprint & window).sum() * pixel_area), 4),
+        "excluded_residual_pit_mm2": round(float((residual_pits & window).sum() * pixel_area), 4),
+        "excluded_missing_coverage_mm2": round(float(missing.sum() * pixel_area), 4),
+    }
+    return summary, rows, shown
 
 
 def rim_transition(frame, marks, opts):

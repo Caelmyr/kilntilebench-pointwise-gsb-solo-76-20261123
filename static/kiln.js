@@ -381,23 +381,43 @@ function measurement() {
   const source = activePhoto();
   const comparison = select("other", state.run.photos.filter((item) => item.id !== source.id && item.corners)
     .map((item) => [item.id, item.title]));
+  const reference = select("reference_reading", state.run.readings
+    .map((saved) => [saved.id, saved.title + " · " + new Date(saved.recorded).toLocaleString()]));
   let controls = {};
+  let listControls = {};
   let options = {};
 
   function rebuild() {
     const spec = available[operation.value];
     controls = {};
+    listControls = {};
     options = {};
     hint.textContent = spec.help;
     fields.replaceChildren();
     if (spec.paired) fields.append(field("Comparison photograph", comparison));
+    if (spec.requires_reading) fields.append(field("Adopted repair selection reading", reference));
     function addMarks(specification, photo) {
       for (const [key, type] of Object.entries(specification)) {
         const entries = state.run.marks.filter((mark) => mark.purpose === type && mark.photo === photo);
-        const editor = select(key, entries.map((mark) => [mark.id, mark.title]));
-        editor.required = true;
-        controls[key] = editor;
-        fields.append(field(displayName(key) + " / " + state.config.marks[type], editor));
+        if (spec.list_slots?.includes(key)) {
+          const wrapper = element("div");
+          wrapper.className = "check-list";
+          const checkboxes = entries.map((mark) => {
+            const item = element("label");
+            const box = input("candidate-" + mark.id, "checkbox");
+            box.value = mark.id;
+            item.append(box, element("span", mark.title));
+            wrapper.append(item);
+            return box;
+          });
+          listControls[key] = checkboxes;
+          fields.append(field(displayName(key) + " / " + state.config.marks[type], wrapper));
+        } else {
+          const editor = select(key, entries.map((mark) => [mark.id, mark.title]));
+          if (!spec.optional_slots?.includes(key)) editor.required = true;
+          controls[key] = editor;
+          fields.append(field(displayName(key) + " / " + state.config.marks[type], editor));
+        }
       }
     }
     addMarks(spec.reference, source.id);
@@ -415,13 +435,27 @@ function measurement() {
   open("Take reading", form("Save reading", async () => {
     const readingType = available[operation.value];
     if (readingType.paired && !comparison.value) throw new Error("Add a second calibrated photograph first.");
-    if (Object.values(controls).some((control) => !control.value)) throw new Error("Mark the required references first.");
-    const result = await api(runURL() + "/readings", "POST", {
+    if (readingType.requires_reading && !reference.value) throw new Error("Choose the adopted repair selection reading.");
+    if (Object.values(controls).some((control) => control.required && !control.value)) {
+      throw new Error("Mark the required references first.");
+    }
+    const listMarks = {};
+    for (const [key, boxes] of Object.entries(listControls)) {
+      const chosen = boxes.filter((box) => box.checked).map((box) => box.value);
+      if (!chosen.length) throw new Error("Select at least one " + displayName(key) + " mark.");
+      listMarks[key] = chosen;
+    }
+    const payload = {
       revision: state.run.revision, mode: operation.value, photo: source.id,
       other: comparison.value,
-      marks: Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value])),
+      marks: {
+        ...Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value])),
+        ...listMarks,
+      },
       options: Object.fromEntries(Object.entries(options).map(([key, control]) => [key, control.valueAsNumber])),
-    });
+    };
+    if (readingType.requires_reading) payload.reference_reading = reference.value;
+    const result = await api(runURL() + "/readings", "POST", payload);
     replaceRun(result.run);
     openReading(result.reading);
   }, field("Reading", operation), hint, fields));

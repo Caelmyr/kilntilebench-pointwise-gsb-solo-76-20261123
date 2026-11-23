@@ -12,6 +12,7 @@ MARKS = {
     "pinhole": "Pinhole search patch", "inspect": "Inspection patch",
     "matte": "Matte control", "gloss": "Gloss control", "decor": "Decorated glaze patch",
     "register": "Matched decal marks", "stroke": "Border transect",
+    "repair": "Glaze repair range", "reserve": "Retained original glaze",
 }
 READINGS = {
     "glaze-tone": ("Glaze tone", "Read Lab tone and variation on a marked glaze patch."),
@@ -19,6 +20,8 @@ READINGS = {
     "decal-coverage": ("Decal coverage", "Estimate visible decorated area along the glaze-to-decal color axis."),
     "brush-period": ("Glaze brush spacing", "Read dominant spacing and direction in a brushed glaze patch."),
     "pinhole-map": ("Pinhole map", "Locate compact, dark pits on the glaze face."),
+    "repair-selection": ("Glaze repair selection", "Choose one repair range that covers the minimum fully observed pits without touching the retained glaze."),
+    "repair-tone": ("Untouched glaze tone window", "Measure glaze tone on observed original glaze outside the adopted repair range, residual pits and missing coverage."),
     "rim_transition": ("Glaze rim transition", "Measure the 10–90% change across a marked glaze rim line."),
     "decal-offset": ("Decal register", "Compare the positions of matched decal landmarks on two photographs."),
     "grazing-response": ("Grazing response", "Compare face and grazing brightness against matte and gloss witnesses."),
