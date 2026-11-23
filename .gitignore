@@ -1,0 +1,4 @@
+.kilnbench/
+.venv/
+__pycache__/
+*.pyc

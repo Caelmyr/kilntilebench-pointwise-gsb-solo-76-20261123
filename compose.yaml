@@ -1,0 +1,23 @@
+name: solo79-kilnbench
+services:
+  desk:
+    build:
+      context: .
+      args:
+        KILNBENCH_RUNTIME_IMAGE: ${KILNBENCH_RUNTIME_IMAGE:-python:3.12-slim}
+    image: ${KILNBENCH_IMAGE:-solo79-kilnbench:1.0}
+    network_mode: bridge
+    environment:
+      OPENBLAS_NUM_THREADS: 1
+      OMP_NUM_THREADS: 1
+    ports:
+      - "127.0.0.1:${KILNBENCH_PORT:-19991}:8000"
+    volumes:
+      - tile-library:/var/lib/kilnbench
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/kiln/health', timeout=3).status == 200"]
+      interval: 3s
+      timeout: 4s
+      retries: 12
+volumes:
+  tile-library:
