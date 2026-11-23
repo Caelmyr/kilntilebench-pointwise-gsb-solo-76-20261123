@@ -11,6 +11,7 @@ MARKS = {
     "baseglaze": "Base glaze control", "accent": "Decal ink control", "repeat": "Brushed glaze patch",
     "pinhole": "Pinhole search patch", "inspect": "Inspection patch",
     "matte": "Matte control", "gloss": "Gloss control", "decor": "Decorated glaze patch",
+    "check": "Check patch (not a witness)",
     "register": "Matched decal marks", "stroke": "Border transect",
 }
 READINGS = {
@@ -22,8 +23,9 @@ READINGS = {
     "rim_transition": ("Glaze rim transition", "Measure the 10–90% change across a marked glaze rim line."),
     "decal-offset": ("Decal register", "Compare the positions of matched decal landmarks on two photographs."),
     "grazing-response": ("Grazing response", "Compare face and grazing brightness against matte and gloss witnesses."),
+    "gloss-scale": ("Gloss scale check", "Read one ordinary-glaze check patch through each matte/gloss witness pair, then rank the two scales."),
     "paired-coverage": ("Paired tile visibility", "Locate usable pixels in two independently calibrated photographs."),
-    "surface-marks": ("Raking spot map", "Find localized mottle and highlights in one glaze photograph."),
+    "surface-marks": ("Raking spot map", "Find localized mottle and highlights in one glaze photograph, optionally through an adopted gloss scale."),
     "color-drift": ("Fired color difference", "Read Lab differences between two registered views of fired tile samples."),
 }
 POINT_MARKS = {"register", "stroke"}

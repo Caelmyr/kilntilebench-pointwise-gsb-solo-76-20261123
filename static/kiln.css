@@ -94,6 +94,12 @@ th, td { text-align: left; border-bottom: 1px solid var(--rule); padding: 6px 8p
 th { position: sticky; top: 0; background: var(--tint); }
 .table-wrap { max-height: 240px; overflow: auto; border: 1px solid var(--rule); margin: 12px 0; }
 .result-actions { justify-content: flex-start; flex-wrap: wrap; }
+.adopt-panel { border: 1px solid var(--rule); border-radius: 8px; padding: 12px; margin-top: 13px; background: #f0f7f2; }
+.adopt-panel p { margin-bottom: 8px; }
+.scale-photos { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 11px 0; }
+.scale-photos figure { margin: 0; }
+.scale-photos img { width: 100%; border-radius: 5px; display: block; }
+.scale-photos figcaption { font-size: .85rem; color: var(--muted); margin-top: 3px; }
 @media (max-width: 1040px) {
   .desk { grid-template-columns: 185px minmax(0, 1fr); }
   .main-grid { grid-template-columns: minmax(0, 1fr); }

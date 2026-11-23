@@ -54,7 +54,10 @@ class Library:
             raise Invalid("This sample record is no longer available.") from error
 
     def run(self, key):
-        return self.read(self.runs / (identifier(key) + ".json"))
+        run = self.read(self.runs / (identifier(key) + ".json"))
+        run.setdefault("scales", [])
+        run.setdefault("adopted_scale", run["scales"][-1]["id"] if run["scales"] else None)
+        return run
 
     def list(self):
         documents = (self.read(path) for path in self.runs.glob("*.json"))
@@ -69,7 +72,8 @@ class Library:
             current = stamp()
             run = {
                 **fields, "id": identity(), "revision": 1, "created": current, "updated": current,
-                "photos": photos or [], "marks": marks or [], "readings": [],
+                "photos": photos or [], "marks": marks or [], "readings": [], "scales": [],
+                "adopted_scale": None,
             }
             atomic_write(self.runs / (run["id"] + ".json"), encode_doc(run))
             return run

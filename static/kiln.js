@@ -4,6 +4,8 @@ const byId = (id) => document.getElementById(id);
 const state = { config: null, runs: [], run: null, photo: null, marked: null };
 const dialog = byId("dialog");
 
+const NO_SCALE = "independent";
+
 function element(tag, text) {
   const node = document.createElement(tag);
   if (text !== undefined) node.textContent = text;
@@ -27,7 +29,12 @@ function displayName(value) {
 }
 
 function display(value) {
-  return value == null ? "—" : Array.isArray(value) ? value.join(" · ") : String(value);
+  if (value == null) return "—";
+  if (Array.isArray(value)) return value.join(" · ");
+  if (typeof value === "object") {
+    return Object.entries(value).map(([key, item]) => displayName(key) + " " + display(item)).join(" · ");
+  }
+  return String(value);
 }
 
 async function api(url, method = "GET", payload) {
@@ -85,6 +92,11 @@ function replaceRun(run) {
   renderDesk();
 }
 
+function adoptedScale() {
+  const scales = state.run?.scales ?? [];
+  return scales.find((scale) => scale.id === state.run?.adopted_scale) || scales.at(-1) || null;
+}
+
 async function pickRun(id) {
   state.photo = null;
   state.marked = null;
@@ -125,6 +137,18 @@ function renderDesk() {
   byId("marks").replaceChildren(...marks.map((mark) => entry(
     mark.title, state.config.marks[mark.purpose], () => showMark(mark), mark.id === state.marked,
   )));
+  const adopted = adoptedScale();
+  byId("scales").replaceChildren(...(run.scales ?? []).map((scale) => entry(
+    scale.title,
+    (scale.id === adopted?.id ? "Adopted · " : "") + "Scale " + scale.label +
+      " · separation " + display(scale.witnesses?.separation),
+    () => showScale(scale),
+    scale.id === adopted?.id,
+  )));
+  if (!(run.scales ?? []).length) {
+    const empty = element("p", "No gloss scale adopted yet. Read a Gloss scale check and adopt the selected one.");
+    byId("scales").replaceChildren(empty);
+  }
   byId("readings").replaceChildren(...[...run.readings].reverse().map((saved) => entry(
     saved.title, new Date(saved.recorded).toLocaleString(),
     async () => openReading(await api(runURL() + "/readings/" + saved.id)),
@@ -381,46 +405,117 @@ function measurement() {
   const source = activePhoto();
   const comparison = select("other", state.run.photos.filter((item) => item.id !== source.id && item.corners)
     .map((item) => [item.id, item.title]));
+  const scalePicker = select("scale", []);
+  const frozenNote = element("p");
   let controls = {};
   let options = {};
+  let choices = {};
+  let frozenSource = null;
+  let frozenOther = null;
+
+  function chosenScale() {
+    if (!scalePicker.value || scalePicker.value === NO_SCALE) return null;
+    return (state.run.scales ?? []).find((scale) => scale.id === scalePicker.value) ?? null;
+  }
+
+  function markField(key, type, photo, label) {
+    const entries = state.run.marks.filter((mark) => mark.purpose === type && mark.photo === photo);
+    const editor = select(key, entries.map((mark) => [mark.id, mark.title]));
+    editor.required = true;
+    controls[key] = editor;
+    fields.append(field((label || displayName(key)) + " / " + state.config.marks[type], editor));
+  }
+
+  function rebuildScales() {
+    const options = [[NO_SCALE, "No adopted scale (independent)"]].concat(
+      (state.run.scales ?? []).map((scale) => [scale.id, scale.title + " · scale " + scale.label]));
+    const previous = scalePicker.value;
+    scalePicker.replaceChildren(...options.map(([value, label]) => {
+      const option = element("option", label);
+      option.value = value;
+      return option;
+    }));
+    const adopted = adoptedScale();
+    scalePicker.value = options.some(([value]) => value === previous) ? previous : (adopted?.id ?? NO_SCALE);
+  }
 
   function rebuild() {
     const spec = available[operation.value];
     controls = {};
     options = {};
+    choices = {};
     hint.textContent = spec.help;
+    frozenSource = null;
+    frozenOther = null;
     fields.replaceChildren();
-    if (spec.paired) fields.append(field("Comparison photograph", comparison));
-    function addMarks(specification, photo) {
-      for (const [key, type] of Object.entries(specification)) {
-        const entries = state.run.marks.filter((mark) => mark.purpose === type && mark.photo === photo);
-        const editor = select(key, entries.map((mark) => [mark.id, mark.title]));
-        editor.required = true;
-        controls[key] = editor;
-        fields.append(field(displayName(key) + " / " + state.config.marks[type], editor));
-      }
+    if (spec.scale) {
+      rebuildScales();
+      fields.append(field("Gloss scale", scalePicker));
+    } else if (scalePicker.parentElement) {
+      scalePicker.parentElement.remove();
     }
-    addMarks(spec.reference, source.id);
-    addMarks(spec.comparison, comparison.value);
-    for (const [key, [name, initial, step]] of Object.entries(spec.options)) {
+    const scale = spec.scale ? chosenScale() : null;
+    frozenNote.textContent = "";
+    if (scale) {
+      const first = operation.value === "surface-marks" ? scale.photos.raking : scale.photos.diffuse;
+      const second = operation.value === "surface-marks" ? scale.photos.diffuse : scale.photos.raking;
+      frozenSource = first.id;
+      frozenOther = second.id;
+      frozenNote.textContent = "Frozen to " + first.title + " (source) and " + second.title + " (comparison). " +
+        "The adopted matte, gloss and check marks are reused and cannot be edited here.";
+      fields.append(frozenNote);
+    } else if (spec.paired) {
+      fields.append(field("Comparison photograph", comparison));
+    }
+    const sourcePhoto = frozenSource ?? source.id;
+    const otherPhoto = frozenOther ?? comparison.value;
+    if (operation.value === "gloss-scale") {
+      for (const slot of ["a", "b"]) {
+        for (const type of ["matte", "gloss", "check"]) {
+          markField(type + "_" + slot, type, sourcePhoto);
+        }
+      }
+    } else if (operation.value === "surface-marks" && scale) {
+      markField("region", "inspect", sourcePhoto, "Inspection window");
+    } else if (operation.value === "grazing-response" && scale) {
+      markField("decor", "decor", sourcePhoto, "Decorated patch");
+    } else {
+      for (const [key, type] of Object.entries(spec.reference)) markField(key, type, sourcePhoto);
+      for (const [key, type] of Object.entries(spec.comparison)) markField(key, type, otherPhoto);
+    }
+    const shownOptions = scale && Object.keys(spec.scaled_options ?? {}).length ? spec.scaled_options : spec.options;
+    for (const [key, [name, initial, step]] of Object.entries(shownOptions)) {
       const value = input(key, "number", initial, { step, required: true });
       options[key] = value;
       fields.append(field(name, value));
+    }
+    for (const [key, [name, initial, values]] of Object.entries(spec.choices ?? {})) {
+      const editor = select(key, Object.entries(values).map(([value, label]) => [value, label]));
+      editor.value = initial;
+      choices[key] = editor;
+      fields.append(field(name, editor));
     }
   }
 
   operation.addEventListener("change", rebuild);
   comparison.addEventListener("change", rebuild);
+  scalePicker.addEventListener("change", rebuild);
   rebuild();
   open("Take reading", form("Save reading", async () => {
     const readingType = available[operation.value];
-    if (readingType.paired && !comparison.value) throw new Error("Add a second calibrated photograph first.");
+    const scale = readingType.scale ? chosenScale() : null;
+    if (readingType.paired && !scale && !comparison.value) throw new Error("Add a second calibrated photograph first.");
     if (Object.values(controls).some((control) => !control.value)) throw new Error("Mark the required references first.");
     const result = await api(runURL() + "/readings", "POST", {
-      revision: state.run.revision, mode: operation.value, photo: source.id,
-      other: comparison.value,
+      revision: state.run.revision, mode: operation.value,
+      photo: frozenSource ?? source.id,
+      other: frozenOther ?? comparison.value,
+      scale: scale ? scale.id : NO_SCALE,
       marks: Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value])),
-      options: Object.fromEntries(Object.entries(options).map(([key, control]) => [key, control.valueAsNumber])),
+      options: {
+        ...Object.fromEntries(Object.entries(options).map(([key, control]) => [key, control.valueAsNumber])),
+        ...Object.fromEntries(Object.entries(choices).map(([key, control]) => [key, control.value])),
+      },
     });
     replaceRun(result.run);
     openReading(result.reading);
@@ -464,9 +559,61 @@ function openReading(reading) {
   links.className = "result-actions";
   links.append(link("Download CSV", url + "/csv"), link("Download evidence packet", url + "/packet"));
   pane.append(hero);
+  if (reading.mode === "gloss-scale") pane.append(adoptPanel(reading));
+  if (reading.scale) {
+    const used = element("p", "Read through adopted gloss scale " + reading.scale.title +
+      " (scale " + reading.scale.label + ", separation " + display(reading.scale.separation) + ").");
+    pane.append(used);
+  }
   if (reading.rows.length) pane.append(table(reading.rows));
   pane.append(links);
   open(reading.title, pane);
+}
+
+function adoptPanel(reading) {
+  const pane = document.createElement("div");
+  pane.className = "adopt-panel";
+  const title = input("title", "text", "Gloss scale " + (reading.summary.chosen_scale ?? ""), { maxLength: 100 });
+  pane.append(element("p", "Adopting keeps this scale and both of its photographs as the frozen reference for later readings. Choose a rule before saving the check reading; adopting does not re-read anything."));
+  pane.append(form("Adopt selected scale", async () => {
+    const result = await api(runURL() + "/scales", "POST", {
+      revision: state.run.revision, reading: reading.id, title: title.value,
+    });
+    replaceRun(result.run);
+    showScale(result.scale);
+  }, field("Scale title", title), grid()));
+  return pane;
+}
+
+function showScale(scale) {
+  const view = element("div");
+  const summary = element("dl");
+  for (const [key, value] of Object.entries({
+    scale: scale.label, adopted: scale.created,
+    matte: scale.witnesses?.matte_difference, gloss: scale.witnesses?.gloss_difference,
+    separation: scale.witnesses?.separation, "check reading": scale.witnesses?.relative_response,
+    expected: scale.check?.expected, interval: scale.check?.interval,
+    "selection rule": scale.selection_rule,
+  })) {
+    summary.append(element("dt", displayName(key)), element("dd", display(value)));
+  }
+  view.append(summary);
+  const photos = element("div");
+  photos.className = "scale-photos";
+  for (const side of ["diffuse", "raking"]) {
+    const photo = scale.photos?.[side];
+    if (!photo) continue;
+    const figure = document.createElement("figure");
+    const image = element("img");
+    image.alt = side + " photograph kept with the adopted scale";
+    image.src = runURL() + "/scales/" + scale.id + "/photos/" + side;
+    const caption = element("figcaption", side + " · " + photo.title);
+    figure.append(image, caption);
+    photos.append(figure);
+  }
+  view.append(photos);
+  view.append(link("Download gloss-scale packet", runURL() + "/scales/" + scale.id + "/packet"));
+  open(scale.title, view);
 }
 
 async function init() {

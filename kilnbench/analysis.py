@@ -221,6 +221,185 @@ def grazing_response(frame, other, marks, _opts):
     return {"relative_grazing_response": round(response, 4), "control_separation": round(denominator, 4)}, rows, shown
 
 
+def _patch_difference(frame, other, mark, usable):
+    mask = region(frame, mark) & usable
+    if mask.sum() < 32:
+        raise Invalid(f"The “{mark['title']}” patch needs at least 32 pixels visible in both photographs.")
+    return mask, float(np.median((other.luma - frame.luma)[mask]))
+
+
+def gloss_scale(frame, other, marks, opts):
+    """Read one check patch through two independent matte/gloss witness pairs."""
+    usable = frame.useful & other.useful
+    expected = number(opts.get("expected", .22), "expected check reading", -10, 10)
+    low = number(opts.get("low", .1), "check interval low", -10, 10)
+    high = number(opts.get("high", .35), "check interval high", -10, 10)
+    if low > high:
+        raise Invalid("The check interval needs a low value no greater than its high value.")
+    if not low <= expected <= high:
+        raise Invalid("The expected check reading must fall inside the check interval.")
+    rule = opts.get("rule", "separation")
+    if rule not in ("separation", "closeness"):
+        raise Invalid("Choose a valid selection rule.")
+    tie_fraction = number(opts.get("tie_tolerance", .1), "near-tie fraction", 0, 1)
+    tie_margin = tie_fraction * (high - low)
+    interval = f"{low:g}–{high:g}"
+    colors = {
+        "A": ((.91, .49, .39), (.40, .75, .96), (.94, .78, .34)),
+        "B": ((.73, .51, .91), (.27, .85, .59), (.55, .72, .96)),
+    }
+    shown = image(frame)
+    rows, scales = [], []
+    for key, label in (("a", "A"), ("b", "B")):
+        differences, titles = {}, {}
+        for slot in ("matte", "gloss", "check"):
+            mark = marks[f"{slot}_{key}"]
+            mask, value = _patch_difference(frame, other, mark, usable)
+            differences[slot] = value
+            titles[slot] = mark["title"]
+            tint(shown, mask, colors[label][("matte", "gloss", "check").index(slot)], .42)
+        separation = differences["gloss"] - differences["matte"]
+        if abs(separation) < .025:
+            raise Invalid(f"Scale {label} needs matte and gloss witnesses with responses at least 0.025 apart.")
+        reading = (differences["check"] - differences["matte"]) / separation
+        rows.append({
+            "scale": label, "matte_witness": titles["matte"], "gloss_witness": titles["gloss"],
+            "check_patch": titles["check"], "matte_difference": round(differences["matte"], 4),
+            "gloss_difference": round(differences["gloss"], 4), "separation": round(separation, 4),
+            "check_difference": round(differences["check"], 4), "relative_response": round(reading, 4),
+            "expected": expected, "interval": interval, "deviation": round(abs(reading - expected), 4),
+            "inside_interval": bool(low <= reading <= high), "selected": False, "note": "",
+        })
+        scales.append({"label": label, "reading": reading, "separation": separation, "row": rows[-1]})
+
+    passing = [scale for scale in scales if scale["row"]["inside_interval"]]
+    if not passing:
+        readings = ", ".join(f"{scale['label']}={scale['reading']:.4f}" for scale in scales)
+        raise Invalid(f"Neither scale reads its check patch inside {interval}: {readings}. Adjust the marks or interval.")
+    if len(passing) == 1:
+        chosen = passing[0]
+        note = "Only one scale read its check patch inside the entered interval."
+    elif rule == "separation":
+        chosen = max(passing, key=lambda scale: abs(scale["separation"]))
+        note = "Both scales read inside the interval; chose the wider matte–gloss separation."
+    else:
+        ordered = sorted(passing, key=lambda scale: abs(scale["reading"] - expected))
+        closest, runner_up = ordered[0], ordered[1]
+        if abs(closest["row"]["deviation"] - runner_up["row"]["deviation"]) <= tie_margin:
+            chosen = max(passing, key=lambda scale: abs(scale["separation"]))
+            note = ("Both scales read inside the interval and were near-tied on the expected value; "
+                    "broke the tie with the wider matte–gloss separation.")
+        else:
+            chosen = closest
+            note = "Both scales read inside the interval; chose the reading closest to the expected value."
+    for scale in scales:
+        row = scale["row"]
+        row["selected"] = scale is chosen
+        if scale is chosen:
+            row["note"] = "Selected: " + note
+        elif not row["inside_interval"]:
+            row["note"] = "Outside the entered check interval."
+        else:
+            row["note"] = "Inside the interval but not selected."
+    summary = {
+        "chosen_scale": chosen["label"], "chosen_relative_response": round(chosen["reading"], 4),
+        "expected": expected, "interval_low": low, "interval_high": high,
+        "chosen_separation": round(chosen["separation"], 4), "scales_inside": len(passing),
+        "selection_rule": rule, "selection_note": note,
+    }
+    return summary, rows, shown
+
+
+def _bright_components(frame, mask, residual, threshold, minimum_mm2, aspect_limit=2.6, fill_limit=.22):
+    """Yield compact, solid bright components with their peak residual and area."""
+    pixel_area = frame.step[0] * frame.step[1]
+    candidates = mask & (residual >= threshold)
+    candidates = cv.morphologyEx(candidates.astype(np.uint8), cv.MORPH_OPEN, np.ones((3, 3), np.uint8)).astype(bool)
+    count, labels, stats, _ = cv.connectedComponentsWithStats(candidates.astype(np.uint8), connectivity=8)
+    for label in range(1, count):
+        width, height = stats[label, cv.CC_STAT_WIDTH], stats[label, cv.CC_STAT_HEIGHT]
+        area = float(stats[label, cv.CC_STAT_AREA])
+        if max(width, height) / min(width, height) > aspect_limit or area / (width * height) < fill_limit:
+            continue
+        area_mm2 = area * pixel_area
+        if area_mm2 < minimum_mm2:
+            continue
+        component = labels == label
+        yield component, area_mm2, float(residual[component].max())
+
+
+def _evidence_gaps(frame, mask, minimum_mm2):
+    """Yield contiguous one-photograph-only regions inside the window."""
+    pixel_area = frame.step[0] * frame.step[1]
+    count, labels, stats, centroids = cv.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
+    for label in range(1, count):
+        area_mm2 = float(stats[label, cv.CC_STAT_AREA] * pixel_area)
+        if area_mm2 < minimum_mm2:
+            continue
+        yield labels == label, area_mm2, centroids[label]
+
+
+def raking_spots(raking, diffuse, marks, opts, scale):
+    """Find anomalous grazing highlights in a window through a previously adopted gloss scale."""
+    window = region(raking, marks["region"])
+    if window.sum() < 64:
+        raise Invalid("Mark a larger inspection window.")
+    minimum = number(opts.get("minimum_mm2", .15), "minimum spot area", .03, 40)
+    scale_span = number(opts.get("scale_contrast", .5), "spot contrast in scale units", .05, 20)
+    separation = float(scale["witnesses"]["separation"])
+    if abs(separation) < .025:
+        raise Invalid("The adopted gloss scale lacks a usable matte-gloss separation.")
+    threshold = scale_span * abs(separation)
+    both = window & raking.useful & diffuse.useful
+    raking_only = window & raking.useful & ~diffuse.useful
+    diffuse_only = window & diffuse.useful & ~raking.useful
+    if both.sum() < 64:
+        raise Invalid("The window needs at least 64 pixels clear in both photographs.")
+
+    # Excess of the grazing view over the diffuse view, normalized by the frozen matte-gloss span.
+    render = np.where(both, raking.luma - diffuse.luma, 0.0).astype(np.float32)
+    baseline = cv.GaussianBlur(render, (0, 0), 8)
+    residual = (render - baseline) / abs(separation)
+    shown = image(raking)
+    tint(shown, window, (.42, .68, .80), .10)
+    rows = []
+    for component, area_mm2, peak in _bright_components(raking, both, residual, scale_span, minimum):
+        tint(shown, component, (.95, .48, .24), .6)
+        ys, xs = np.nonzero(component)
+        rows.append({
+            "status": "Measured", "direction": "Bright", "size_mm2": round(area_mm2, 4),
+            "center_mm": rounded([float(np.mean(xs) * raking.step[0]), float(np.mean(ys) * raking.step[1])]),
+            "paired_pixels": int(component.sum()), "clear_photo": "Both photographs",
+            "peak_scale_excess": round(peak, 4), "peak_contrast": round(peak * abs(separation), 4), "note": "",
+        })
+    measured = len(rows)
+    gaps = 0
+    for mask, clear in ((diffuse_only, "Diffuse photograph only"), (raking_only, "Grazing photograph only")):
+        for component, area_mm2, center in _evidence_gaps(raking, mask, minimum):
+            tint(shown, component, (.62, .40, .82), .55)
+            gaps += 1
+            rows.append({
+                "status": "Missing evidence", "direction": "Unobserved", "size_mm2": round(area_mm2, 4),
+                "center_mm": rounded([float(center[0] * raking.step[0]), float(center[1] * raking.step[1])]),
+                "paired_pixels": 0, "clear_photo": clear, "peak_scale_excess": None, "peak_contrast": None,
+                "note": "Only one photograph is clear here, so the adopted references cannot confirm a spot.",
+            })
+    rows.sort(key=lambda row: (row["status"] != "Measured", -row["size_mm2"]))
+    pixel_area = raking.step[0] * raking.step[1]
+    missing_area = float((raking_only | diffuse_only).sum() * pixel_area)
+    summary = {
+        "scale": scale.get("title", "Adopted gloss scale"), "scale_id": scale.get("id"),
+        "scale_label": scale.get("label"),
+        "bright_spots": measured, "missing_evidence": gaps,
+        "missing_evidence_mm2": round(missing_area, 4),
+        "window_mm2": round(float(window.sum() * pixel_area), 4),
+        "threshold_scale_units": scale_span, "threshold_luma": round(threshold, 4),
+        "reference_separation": round(separation, 4),
+        "evidence_status": "complete" if gaps == 0 and missing_area < pixel_area else "incomplete",
+    }
+    return summary, rows[:50], shown
+
+
 def paired_coverage(frame, other, marks, _opts):
     domain = region(frame, marks["region"])
     valid_a = domain & frame.useful

@@ -35,3 +35,18 @@ def packet(library, reading):
         for index, image in enumerate(reading["photos"], 1):
             archive.writestr(f"source/{index}-{image['filename']}", library.blob(image["blob"]).read_bytes())
     return output.getvalue()
+
+
+def scale_packet(library, scale):
+    """Bundle an adopted gloss scale with the two photographs and patch marks that defined it."""
+    output = io.BytesIO()
+    with ZipFile(output, "w", compression=ZIP_DEFLATED) as archive:
+        archive.writestr("gloss-scale.json", encode_doc(scale))
+        rows = [{"patch": slot, "title": scale["marks"][slot]["title"],
+                 "purpose": scale["marks"][slot]["purpose"],
+                 "points": scale["marks"][slot]["points"]} for slot in ("matte", "gloss", "check")]
+        archive.writestr("witness-patches.csv", rows_csv({"rows": rows}))
+        for side in ("diffuse", "raking"):
+            photo = scale["photos"][side]
+            archive.writestr(f"source/{side}-{photo['filename']}", library.blob(photo["blob"]).read_bytes())
+    return output.getvalue()

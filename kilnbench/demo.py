@@ -20,7 +20,17 @@ CONTROLS = [
     ("Brushed edge slip", "repeat", (487, 168, 565, 218)),
     ("Glaze pits", "pinhole", (205, 347, 424, 493)),
     ("Field and reflected spots", "inspect", (500, 337, 771, 506)),
+    ("Check patch A", "check", (470, 90, 550, 140)),
+    ("Satin matte witness", "matte", (740, 90, 820, 140)),
+    ("Satin gloss witness", "gloss", (830, 90, 910, 140)),
+    ("Check patch B", "check", (650, 90, 730, 140)),
 ]
+# Designed raking-only reflectances so both witness pairs bracket a common check interval.
+CHECK_A_LIFT = (470, 90, 550, 140, 8)
+SATIN_GLOSS_LIFT = (830, 90, 910, 140, 70)
+CHECK_B_LIFT = (650, 90, 730, 140, 19)
+# Both observation photographs share tile corners; only the decal crosses carry a small print offset.
+REGISTER_SHIFT = {"face": (0, 0), "rake": (3, -2), "detail": (0, 0)}
 
 
 def points(pixels):
@@ -72,6 +82,9 @@ def sample_photograph(role, shift, seed):
         glaze[gloss] += 39
         glaze[middle & petals] += 12
         glaze += (np.clip((x - 520) / 520, -1, 1) * 4)[:, :, None]
+        # Deliberately weaker second witness pair and two designed check reflectances.
+        for x0, y0, x1, y1, lift in (CHECK_A_LIFT, SATIN_GLOSS_LIFT, CHECK_B_LIFT):
+            glaze[(x >= x0) & (x < x1) & (y >= y0) & (y < y1)] += lift
     if role == "detail":
         glaze[rounded_tile] += np.array([4, -.5, -1.5])
 
@@ -84,8 +97,13 @@ def sample_photograph(role, shift, seed):
         col = (244, 229, 201, 255) if radius % 2 == 0 else (82, 67, 54, 255)
         cv.circle(pixels, (cx + shift[0], cy + shift[1]), radius, col, -1, cv.LINE_AA)
     for idx, (fx, fy) in enumerate(REGISTERS):
-        center = (fx + shift[0] + (idx % 2), fy + shift[1])
+        dx, dy = REGISTER_SHIFT.get(role, (0, 0))
+        center = (fx + shift[0] + dx + (idx % 2), fy + shift[1] + dy)
         cv.drawMarker(pixels, center, (58, 49, 45, 255), cv.MARKER_CROSS, 15, 2)
+    if role == "rake":
+        # Localized specular highlights that only the grazing light reveals inside the inspection window.
+        for cx, cy, radius in ((545, 365, 4), (600, 420, 6), (735, 385, 5), (700, 480, 4)):
+            cv.circle(pixels, (cx + shift[0], cy + shift[1]), radius + 2, (255, 246, 224, 255), -1, cv.LINE_AA)
     if role == "face":
         pixels[468:496, 687:736] = 0
     elif role == "rake":
@@ -98,7 +116,7 @@ def create(library):
     photos, marks = [], []
     for title, role, shift, seed in (
         ("Diffuse face / blue border", "face", (0, 0), 25),
-        ("Grazing face / blue border", "rake", (4, -3), 58),
+        ("Grazing face / blue border", "rake", (0, 0), 58),
         ("Macro tile surface", "detail", (0, 0), 84),
     ):
         photo = {"id": identity(), "title": title, "role": role, "filename": role + "-tile.png",
@@ -106,10 +124,11 @@ def create(library):
                  "synthetic": True, "uploaded": stamp()}
         photos.append(photo)
         items = [(title, purpose, box(*bounds)) for title, purpose, bounds in CONTROLS]
+        dx, dy = REGISTER_SHIFT.get(role, (0, 0))
         items.extend([
             ("Across the fired rim", "stroke", points([(791, 394), (883, 394)])),
             ("Matching decal crosses", "register", points([
-                (fx + shift[0] + (i % 2), fy + shift[1]) for i, (fx, fy) in enumerate(REGISTERS)
+                (fx + shift[0] + dx + (i % 2), fy + shift[1] + dy) for i, (fx, fy) in enumerate(REGISTERS)
             ])),
         ])
         for title, purpose, vertices in items:
