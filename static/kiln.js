@@ -383,11 +383,16 @@ function measurement() {
     .map((item) => [item.id, item.title]));
   let controls = {};
   let options = {};
+  let placement = null;
+  let placementRecord = null;
 
   function rebuild() {
     const spec = available[operation.value];
     controls = {};
     options = {};
+    placement = null;
+    placementRecord = null;
+    comparison.disabled = false;
     hint.textContent = spec.help;
     fields.replaceChildren();
     if (spec.paired) fields.append(field("Comparison photograph", comparison));
@@ -407,6 +412,21 @@ function measurement() {
       options[key] = value;
       fields.append(field(name, value));
     }
+    const placements = [...state.run.readings].reverse().filter((saved) => saved.mode === "seam-fit");
+    if (operation.value === "color-drift" && placements.length) {
+      placement = select("placement", [["", "None — ordinary comparison"],
+        ...placements.map((saved) => [saved.id, saved.title + " · " + new Date(saved.recorded).toLocaleString()])]);
+      placement.addEventListener("change", guarded(async () => {
+        placementRecord = null;
+        comparison.disabled = false;
+        if (!placement.value) return;
+        const detail = await api(runURL() + "/readings/" + placement.value);
+        placementRecord = detail;
+        comparison.value = detail.photos[1].id;
+        comparison.disabled = true;
+      }));
+      fields.append(field("Adopted seam placement", placement));
+    }
   }
 
   operation.addEventListener("change", rebuild);
@@ -416,11 +436,18 @@ function measurement() {
     const readingType = available[operation.value];
     if (readingType.paired && !comparison.value) throw new Error("Add a second calibrated photograph first.");
     if (Object.values(controls).some((control) => !control.value)) throw new Error("Mark the required references first.");
+    if (placement?.value) {
+      if (!placementRecord) throw new Error("The placement record is still loading. Choose it again.");
+      if (placementRecord.photos[0].id !== source.id) {
+        throw new Error("Open “" + placementRecord.photos[0].title + "” to measure its seam window with this placement.");
+      }
+    }
     const result = await api(runURL() + "/readings", "POST", {
       revision: state.run.revision, mode: operation.value, photo: source.id,
       other: comparison.value,
       marks: Object.fromEntries(Object.entries(controls).map(([key, control]) => [key, control.value])),
       options: Object.fromEntries(Object.entries(options).map(([key, control]) => [key, control.valueAsNumber])),
+      placement: placement?.value || undefined,
     });
     replaceRun(result.run);
     openReading(result.reading);

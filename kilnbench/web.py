@@ -20,13 +20,18 @@ MEASUREMENTS = {
     "grazing-response": (analysis.grazing_response, {"matte": "matte", "gloss": "gloss", "decor": "decor"}, {}),
     "paired-coverage": (analysis.paired_coverage, {"region": "inspect"}, {}),
     "surface-marks": (analysis.surface_marks, {"region": "inspect"}, {}),
+    "seam-fit": (analysis.seam_fit, {"band": "seam", "baseglaze": "baseglaze", "accent": "accent"},
+                 {"piece_baseglaze": "baseglaze", "piece_accent": "accent"}),
     "color-drift": (analysis.color_drift, {"region": "inspect"}, {}),
 }
-PAIRED = {"decal-offset", "grazing-response", "paired-coverage", "color-drift"}
+PAIRED = {"decal-offset", "grazing-response", "paired-coverage", "seam-fit", "color-drift"}
 OPTIONS = {
     "decal-coverage": {"threshold": ["Decal likeness threshold", .5, .01]},
     "pinhole-map": {"luma": ["Dark-pit threshold", .31, .01]},
     "surface-marks": {"contrast": ["Spot contrast", .075, .005], "minimum_mm2": ["Minimum area (mm²)", .15, .01]},
+    "seam-fit": {"threshold": ["Decal likeness threshold", .5, .01],
+                 "min_common_pct": ["Minimum common visibility (%)", 70, 1],
+                 "min_match_pct": ["Minimum pattern match (%)", 60, 1]},
     "color-drift": {"delta_e": ["Color difference threshold", 5, .1]},
 }
 
@@ -37,6 +42,19 @@ def input_json():
 
 def sample_frame(library, run, photo):
     return photos.plane({**photo, "pixels": photos.decode(library.blob(photo["blob"]).read_bytes())}, run)
+
+
+def adopted_placement(library, run, raw, source, other):
+    """Resolve the seam placement record a color difference reading should reuse."""
+    if raw in (None, ""):
+        return None
+    record = library.reading(run, raw)
+    adopted = record.get("placement")
+    if record["mode"] != "seam-fit" or not isinstance(adopted, dict):
+        raise Invalid("Choose a seam placement comparison with an adopted placement.")
+    if adopted.get("source_photo") != source["id"] or adopted.get("other_photo") != other["id"]:
+        raise Invalid("The adopted placement belongs to a different photograph pair.")
+    return {"source_reading": record["id"], **adopted}
 
 
 def measure(library, run, data):
@@ -57,6 +75,7 @@ def measure(library, run, data):
 
     read_marks(source_roles, source)
     used = [source]
+    placement = None
     if mode in PAIRED:
         other = locate(run["photos"], data.get("other"), "The comparison photograph")
         if other["id"] == source["id"]:
@@ -64,14 +83,27 @@ def measure(library, run, data):
         other_frame = sample_frame(library, run, other)
         read_marks(other_roles, other)
         used.append(other)
-        summary, rows, pixels = work(source_frame, other_frame, selected, options)
+        if mode == "color-drift":
+            placement = adopted_placement(library, run, data.get("placement"), source, other)
+            if placement and placement["orientation"] == "rotated":
+                other_frame = photos.turned(other_frame)
+            summary, rows, pixels = work(source_frame, other_frame, selected, options,
+                                         None if placement is None else placement["orientation"])
+        else:
+            summary, rows, pixels = work(source_frame, other_frame, selected, options)
     else:
         summary, rows, pixels = work(source_frame, selected, options)
-    return {
+    result = {
         "mode": mode, "title": READINGS[mode][0], "summary": summary, "rows": rows, "photos": used,
         "options": options, "marks": selected, "sheet_mm": [run["width_mm"], run["height_mm"]],
         "source_revision": run["revision"], "overlay": library.keep(photos.png(pixels)),
     }
+    if mode == "seam-fit":
+        result["placement"] = {"orientation": summary["adopted_placement"], "source_photo": source["id"],
+                               "other_photo": other["id"], "rule": analysis.SEAM_RULE}
+    elif placement is not None:
+        result["placement"] = placement
+    return result
 
 
 def install(app, root):

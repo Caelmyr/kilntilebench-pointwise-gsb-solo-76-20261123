@@ -11,7 +11,7 @@ MARKS = {
     "baseglaze": "Base glaze control", "accent": "Decal ink control", "repeat": "Brushed glaze patch",
     "pinhole": "Pinhole search patch", "inspect": "Inspection patch",
     "matte": "Matte control", "gloss": "Gloss control", "decor": "Decorated glaze patch",
-    "register": "Matched decal marks", "stroke": "Border transect",
+    "register": "Matched decal marks", "stroke": "Border transect", "seam": "Seam band",
 }
 READINGS = {
     "glaze-tone": ("Glaze tone", "Read Lab tone and variation on a marked glaze patch."),
@@ -24,6 +24,7 @@ READINGS = {
     "grazing-response": ("Grazing response", "Compare face and grazing brightness against matte and gloss witnesses."),
     "paired-coverage": ("Paired tile visibility", "Locate usable pixels in two independently calibrated photographs."),
     "surface-marks": ("Raking spot map", "Find localized mottle and highlights in one glaze photograph."),
+    "seam-fit": ("Seam placement comparison", "Measure a replacement piece straight and turned 180° along the seam band, then keep one adopted placement."),
     "color-drift": ("Fired color difference", "Read Lab differences between two registered views of fired tile samples."),
 }
 POINT_MARKS = {"register", "stroke"}

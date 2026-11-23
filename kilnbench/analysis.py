@@ -7,7 +7,7 @@ import numpy as np
 from image_lab.validation import Invalid
 
 from .model import number
-from .photos import coordinates, image, region
+from .photos import coordinates, image, region, turned
 
 
 def tint(shown, mask, color, amount=.58):
@@ -273,7 +273,71 @@ def surface_marks(frame, marks, opts):
     return {"spots": len(rows), "spot_fraction_pct": round(100 * accumulated.sum() / area.sum(), 3)}, rows[:50], shown
 
 
-def color_drift(frame, other, marks, opts):
+SEAM_RULE = ("Adopt the placement with the higher pattern match; when the two match percentages differ "
+             "by less than 1 point, adopt the placement with the lower median seam color difference.")
+MATCH_TIE_PCT = 1.0
+
+
+def seam_fit(frame, other, marks, opts):
+    """Compare the two untranslated placements of a replacement piece along the seam band."""
+    band = region(frame, marks["band"])
+    if np.count_nonzero(band) < 32:
+        raise Invalid("Mark a larger seam band.")
+    threshold = number(opts.get("threshold", .5), "decal likeness threshold", .1, .9)
+    min_common = number(opts.get("min_common_pct", 70), "minimum common visibility (%)", 0, 100)
+    min_match = number(opts.get("min_match_pct", 60), "minimum pattern match (%)", 0, 100)
+    reference_pattern = decal_projection(frame, marks["baseglaze"], marks["accent"]) >= threshold
+    piece_pattern = decal_projection(other, marks["piece_baseglaze"], marks["piece_accent"]) >= threshold
+    candidates = []
+    for orientation in ("straight", "rotated"):
+        placed = turned(other) if orientation == "rotated" else other
+        pattern = piece_pattern[::-1, ::-1] if orientation == "rotated" else piece_pattern
+        common = band & frame.useful & placed.useful
+        entry = {"orientation": orientation, "common_pixels": int(common.sum()),
+                 "common_visible_pct": round(100 * common.sum() / band.sum(), 3),
+                 "pattern_match_pct": None, "median_seam_delta_e76": None}
+        if entry["common_pixels"] >= 32:
+            entry["pattern_match_pct"] = round(float(100 * np.mean(reference_pattern[common] == pattern[common])), 3)
+            delta = np.linalg.norm(lab(frame.rgb[common]) - lab(placed.rgb[common]), axis=1)
+            entry["median_seam_delta_e76"] = round(float(np.median(delta)), 4)
+        entry["usable"] = (entry["pattern_match_pct"] is not None
+                           and entry["common_visible_pct"] >= min_common
+                           and entry["pattern_match_pct"] >= min_match)
+        candidates.append(entry)
+    passing = [entry for entry in candidates if entry["usable"]]
+    if not passing:
+        raise Invalid("Neither placement reaches the minimum common visibility and pattern match; "
+                      "the replacement piece is not usable along this seam.")
+    if len(passing) == 1:
+        adopted = passing[0]
+    elif abs(candidates[0]["pattern_match_pct"] - candidates[1]["pattern_match_pct"]) < MATCH_TIE_PCT:
+        adopted = min(candidates, key=lambda entry: entry["median_seam_delta_e76"])
+    else:
+        adopted = max(candidates, key=lambda entry: entry["pattern_match_pct"])
+    placed = turned(other) if adopted["orientation"] == "rotated" else other
+    pattern = piece_pattern[::-1, ::-1] if adopted["orientation"] == "rotated" else piece_pattern
+    common = band & frame.useful & placed.useful
+    matched = common & (reference_pattern == pattern)
+    shown = image(frame)
+    tint(shown, band & ~common, (.52, .58, .68), .42)
+    tint(shown, common & ~matched, (.95, .6, .3), .5)
+    tint(shown, matched, (.28, .8, .55), .45)
+    rows = [
+        {"placement": "Straight" if entry["orientation"] == "straight" else "Rotated 180°",
+         "common_visible_pct": entry["common_visible_pct"], "pattern_match_pct": entry["pattern_match_pct"],
+         "median_seam_delta_e76": entry["median_seam_delta_e76"],
+         "decision": "Adopted" if entry is adopted else ("Passed, not adopted" if entry["usable"] else "Below minimum")}
+        for entry in candidates
+    ]
+    summary = {"adopted_placement": adopted["orientation"], "selection_rule": SEAM_RULE,
+               "adopted_common_visible_pct": adopted["common_visible_pct"],
+               "adopted_pattern_match_pct": adopted["pattern_match_pct"],
+               "adopted_seam_delta_e76": adopted["median_seam_delta_e76"],
+               "band_pixels": int(band.sum())}
+    return summary, rows, shown
+
+
+def color_drift(frame, other, marks, opts, placed=None):
     domain = region(frame, marks["region"])
     area = domain & frame.useful & other.useful
     if area.sum() < 32:
@@ -291,5 +355,21 @@ def color_drift(frame, other, marks, opts):
         {"statistic": "Median", "delta_e76": round(float(np.median(delta)), 4)},
         {"statistic": "90th percentile", "delta_e76": round(float(np.percentile(delta, 90)), 4)},
     ]
-    return {"median_delta_e76": rows[0]["delta_e76"], "above_tolerance_pct": round(100 * above.sum() / area.sum(), 3),
-            "paired_pixels": int(area.sum())}, rows, shown
+    summary = {"median_delta_e76": rows[0]["delta_e76"], "above_tolerance_pct": round(100 * above.sum() / area.sum(), 3),
+               "paired_pixels": int(area.sum())}
+    if placed is None:
+        return summary, rows, shown
+    total = int(domain.sum())
+    groups = [
+        ("Both photographs", area),
+        ("Reference only", domain & frame.useful & ~other.useful),
+        ("Comparison only", domain & ~frame.useful & other.useful),
+        ("Neither photograph", domain & ~(frame.useful | other.useful)),
+    ]
+    for label, mask in groups:
+        if label != "Both photographs":
+            tint(shown, mask, (.55, .6, .7), .38)
+        rows.append({"observation": label, "pixels": int(mask.sum()), "percent": round(100 * mask.sum() / total, 3)})
+    summary["placed_orientation"] = placed
+    summary["window_pixels"] = total
+    return summary, rows, shown

@@ -83,6 +83,11 @@ def region(frame, mark):
     return bitmap.astype(bool)
 
 
+def turned(frame):
+    """Rotate a calibrated frame 180° inside the same measured extent, without translation."""
+    return Frame(frame.rgb[::-1, ::-1].copy(), frame.support[::-1, ::-1].copy(), frame.step)
+
+
 def image(frame):
     shown = frame.rgb.copy()
     yy, xx = np.indices(frame.support.shape)
